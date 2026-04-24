@@ -1,5 +1,5 @@
 "use client";
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, createContext, useContext } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useCOs } from "@/lib/useCOs.js";
 import { useProjects } from "@/lib/useProjects.js";
@@ -7,7 +7,7 @@ import { useTrades } from "@/lib/useTrades.js";
 import { useVendors } from "@/lib/useVendors.js";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
-import { uploadFile, getSignedUrl, removeFile, isFileMeta, MAX_FILE_BYTES } from "@/lib/storage.js";
+import { uploadFile, getSignedUrl, removeFile, isFileMeta, MAX_FILE_BYTES, sanitizeFilename } from "@/lib/storage.js";
 import { supabase, supabaseReady } from "@/lib/supabase.js";
 import { exportCOPdf, exportCOsPdf } from "@/lib/pdf.js";
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/comp
 import {
   FileText, List, Calendar, BarChart3, Plus, RotateCcw, Search,
   Link2, Minus, Hourglass, Check, AlarmClock, Clock,
-  ChevronLeft, ChevronRight, AlertTriangle, LogOut,
+  ChevronLeft, ChevronRight, AlertTriangle,
   Cloud, HardDrive, Download, Upload, Paperclip, Image as ImageIcon,
   X, Trash2, Briefcase, Ruler, HelpCircle, TriangleAlert, PlusCircle,
   MinusCircle, RefreshCw, Lightbulb, CloudRain, DollarSign,
@@ -115,11 +115,14 @@ const DEFAULT_PROJECTS = [
   { id:"hibr", prefix:"HIBR", name:"Hampton Inn — Baton Rouge",      originalContract:0, currentContract:0 },
   { id:"hwg",  prefix:"HWG",  name:"Homewood Suites — Gonzales",     originalContract:0, currentContract:0 },
 ];
-let PROJECTS = DEFAULT_PROJECTS; // module-level reference, synced from useProjects() at runtime
+// Projects are exposed to descendants via React context so no module-level
+// mutation is needed (important under React 19 strict + concurrent rendering).
+const ProjectsContext = createContext(DEFAULT_PROJECTS);
+const useProjectsCtx = () => useContext(ProjectsContext);
 
 // Next CO number for a given project — highest trailing number +1, zero-padded.
-function nextCONumber(cos, projectId) {
-  const proj = PROJECTS.find((p) => p.id === projectId);
+function nextCONumber(cos, projectId, projects) {
+  const proj = projects.find((p) => p.id === projectId);
   if (!proj) return "CO-001";
   const projCOs = cos.filter((c) => c.project === projectId);
   let maxN = 0;
@@ -136,8 +139,6 @@ const TODAY = TODAY_DATE.toISOString().slice(0,10);
 // ─── INITIAL DATA ─────────────────────────────────────────────────
 const INIT_COs = [];
 
-// Sub-COs (sub's pricing for a prime CO)
-const INIT_SUBCOs = [];
 
 // ─── HELPERS ──────────────────────────────────────────────────────
 function Avatar({ id, size = 24 }) {
@@ -195,6 +196,38 @@ function fmtAmt(n) {
 }
 function daysUntil(d) { if(!d)return null; return Math.round((new Date(d)-TODAY_DATE)/86400000); }
 
+// Safely run an export function (CSV/PDF). If the export throws, surface a
+// user-visible error so they know the download did not happen.
+function safeExport(fn, label) {
+  try { fn(); }
+  catch (e) {
+    console.error(`${label} export failed`, e);
+    if (typeof window !== "undefined") {
+      alert(`${label} export failed: ${e?.message || "Unknown error"}`);
+    }
+  }
+}
+
+// Human-readable relative time for ISO timestamps on comments.
+// Accepts either an ISO string or a legacy free-text value (returned as-is).
+function relTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  const secs = Math.max(1, Math.round((Date.now() - d.getTime()) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months} month${months === 1 ? "" : "s"} ago`;
+  const years = Math.round(days / 365);
+  return `${years} year${years === 1 ? "" : "s"} ago`;
+}
+
 // ─── CSV EXPORT ───────────────────────────────────────────────────
 function csvEscape(v) {
   if (v == null) return "";
@@ -242,9 +275,9 @@ function DueBadge({ due, status }) {
 }
 
 // Contract summary per project
-function calcProjectSummary(projectId, cos) {
+function calcProjectSummary(projectId, cos, projects) {
   const mine = cos.filter(c=>c.project===projectId);
-  const proj = PROJECTS.find(p=>p.id===projectId);
+  const proj = projects.find(p=>p.id===projectId);
   const executed = mine.filter(c=>c.status==="executed");
   const approved = mine.filter(c=>c.status==="approved");
   const pending  = mine.filter(c=>["submitted","under_review"].includes(c.status));
@@ -564,7 +597,8 @@ function FilesTab({ t, setT }) {
 }
 
 // ─── CO DETAIL MODAL ──────────────────────────────────────────────
-function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
+function COModal({ co, onClose, onUpdate, onDelete }) {
+  const PROJECTS = useProjectsCtx();
   const [t, setT] = useState({ ...co });
   const [li, setLi] = useState([...co.lineItems]);
   const [newComment, setNewComment] = useState("");
@@ -574,7 +608,7 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
   function save() { onUpdate({ ...t, lineItems: li }); onClose(); }
   function addComment() {
     if (!newComment.trim()) return;
-    setT((p) => ({ ...p, comments: [...p.comments, { author: "pm", text: newComment.trim(), time: "Just now" }] }));
+    setT((p) => ({ ...p, comments: [...p.comments, { author: "pm", text: newComment.trim(), time: new Date().toISOString() }] }));
     setNewComment("");
   }
   const calcLI = (item) => Math.round(item.qty * item.rate * 100) / 100;
@@ -600,7 +634,32 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
   const ct = CO_TYPES[t.type];
   const cat = TRADE_CATS[t.category];
   const pr = PRIORITY[t.priority];
-  const mySubs = subCOs.filter((s) => s.parentCO === co.id);
+  const mySubs = Array.isArray(t.subCOs) ? t.subCOs : [];
+
+  function addSubCO() {
+    const sub = prompt("Sub-contractor name?");
+    if (!sub || !sub.trim()) return;
+    const title = prompt("Sub CO title?") || "Sub change order";
+    const reqStr = prompt("Requested amount ($)?") || "0";
+    const requestedAmt = Number(reqStr) || 0;
+    const seq = String(mySubs.length + 1).padStart(2, "0");
+    const newSub = {
+      id: `${co.id}-sub-${Date.now()}`,
+      num: `${co.num}-S${seq}`,
+      parentCO: co.id,
+      sub: sub.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40),
+      subName: sub.trim(),
+      title: title.trim(),
+      submittedDate: new Date().toISOString().slice(0, 10),
+      approvedDate: null,
+      requestedAmt,
+      approvedAmt: 0,
+      status: "draft",
+      comments: "",
+      attachments: [],
+    };
+    setT((p) => ({ ...p, subCOs: [...(p.subCOs || []), newSub] }));
+  }
 
   const statusOrder = ["draft", "submitted", "under_review", "approved", "executed"];
   const currentIdx = statusOrder.indexOf(t.status);
@@ -659,10 +718,10 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                 size="sm"
                 variant="outline"
                 onClick={() =>
-                  exportCOPdf(t, {
+                  safeExport(() => exportCOPdf(t, {
                     project: PROJECTS.find((p) => p.id === t.project),
                     coType: ct, category: cat, priority: pr, status: sc, members: MEMBERS,
-                  })
+                  }), "PDF")
                 }
               >
                 <Printer className="size-3.5" />PDF
@@ -1078,7 +1137,7 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                           <div className="flex-1">
                             <div className="mb-1 flex items-center gap-2 text-xs">
                               <span className="font-bold text-stone-800">{m.name}</span>
-                              <span className="text-stone-400">{c.time}</span>
+                              <span className="text-stone-400">{relTime(c.time)}</span>
                             </div>
                             <div className="rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-xs leading-relaxed text-stone-700 shadow-sm">
                               {c.text}
@@ -1142,7 +1201,12 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                       </div>
                     </div>
                   ))}
-                  <Button variant="outline" size="sm" className="mt-2 border-dashed border-orange-300 text-stone-700 hover:bg-orange-50">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={addSubCO}
+                    className="mt-2 border-dashed border-orange-300 text-stone-700 hover:bg-orange-50"
+                  >
                     <Plus className="size-3.5" />Add Sub CO
                   </Button>
                 </div>
@@ -1228,34 +1292,74 @@ function ChevronDownIcon() {
 // ─── ADD CO MODAL ─────────────────────────────────────────────────
 // ─── NEW CONTRACT (PROJECT) MODAL ──────────────────────────────────
 const CONTRACT_STATUSES = [
-  { v: "active",  l: "Active" },
-  { v: "pending", l: "Pending" },
-  { v: "on_hold", l: "On Hold" },
-  { v: "closed",  l: "Closed" },
-  { v: "other",   l: "Other" },
+  { v: "draft",               l: "Draft" },
+  { v: "awarded",             l: "Awarded" },
+  { v: "sent_for_signature",  l: "Sent for Signature" },
+  { v: "executed",            l: "Executed" },
 ];
+
+// Auto-derive a 2–6 char prefix from the project name.
+// "TownePlace Suites — Jackson" -> "TPSJ"   (initials of significant words)
+// "Homewood" -> "HMWD"                       (first 4 consonants/letters)
+function derivePrefix(name) {
+  const clean = (name || "").trim();
+  if (!clean) return "";
+  const stop = new Set(["the", "and", "of", "a", "an", "&", "-", "—", "–", "at", "in"]);
+  const words = clean
+    .split(/[\s\-_/]+/)
+    .map((w) => w.replace(/[^A-Za-z0-9]/g, ""))
+    .filter((w) => w && !stop.has(w.toLowerCase()));
+  if (words.length >= 2) {
+    const initials = words.map((w) => w[0]).join("").toUpperCase().slice(0, 6);
+    if (initials.length >= 2) return initials;
+  }
+  const letters = clean.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  return letters.slice(0, 5);
+}
 
 function NewProjectModal({
   onAdd,
   onClose,
   existingPrefixes = [],
   existingIds = [],
+  existingProjects = [],
   subcontractors = [],
   vendors = [],
+  trades = [],
   addVendor,
 }) {
+  // Project selection mode: "__new__" (create a new parent project) or an existing project id.
+  const [projectMode, setProjectMode] = useState("__new__");
   const [name, setName] = useState("");
-  const [prefix, setPrefix] = useState("");
   const [originalContract, setOriginalContract] = useState(0);
   const [contractDate, setContractDate] = useState("");
   const [contractType, setContractType] = useState("turnkey");
-  const [status, setStatus] = useState("active");
+  const [status, setStatus] = useState("draft");
   const [selectedSubs, setSelectedSubs] = useState([]);
   const [selectedVendors, setSelectedVendors] = useState([]);
+  const [selectedTrades, setSelectedTrades] = useState([]);
   const [pdfFile, setPdfFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const pdfInput = useRef(null);
+
+  // When an existing project is picked, auto-fill the name and skip editing.
+  const pickedProject = existingProjects.find((p) => p.id === projectMode);
+  const effectiveName = pickedProject ? pickedProject.name : name;
+
+  // Auto-generate prefix from name, with collision suffixing.
+  const autoPrefix = useMemo(() => {
+    if (pickedProject) return pickedProject.prefix;
+    let base = derivePrefix(name);
+    if (!base) return "";
+    let candidate = base;
+    let n = 2;
+    while (existingPrefixes.includes(candidate) && n < 20) {
+      candidate = (base + n).slice(0, 6);
+      n += 1;
+    }
+    return candidate;
+  }, [name, existingPrefixes, pickedProject]);
 
   const slug = (s) =>
     (s || "")
@@ -1266,13 +1370,15 @@ function NewProjectModal({
 
   async function submit() {
     setErr(null);
-    const cleanPrefix = prefix.trim().toUpperCase();
-    const cleanName = name.trim();
+    const cleanName = effectiveName.trim();
+    const cleanPrefix = autoPrefix;
     if (!cleanName) { setErr("Name is required."); return; }
-    if (!/^[A-Z0-9]{2,6}$/.test(cleanPrefix)) { setErr("Prefix must be 2–6 letters/digits."); return; }
-    if (existingPrefixes.includes(cleanPrefix)) { setErr(`Prefix "${cleanPrefix}" is already in use.`); return; }
-    let id = slug(cleanName);
-    if (!id || existingIds.includes(id)) id = slug(cleanName + "-" + cleanPrefix);
+    if (!/^[A-Z0-9]{2,6}$/.test(cleanPrefix)) { setErr("Could not generate a prefix from that name — try a longer name."); return; }
+    let id = pickedProject ? pickedProject.id : slug(cleanName);
+    // If creating a new project row and the slug collides, suffix with prefix for uniqueness.
+    if (!pickedProject && (!id || existingIds.includes(id))) id = slug(cleanName + "-" + cleanPrefix);
+    // If the user picked an existing project, we generate a unique row id so we don't overwrite it.
+    if (pickedProject) id = `${pickedProject.id}-contract-${Date.now()}`;
     setBusy(true);
 
     // Upload PDF first, if any.
@@ -1280,7 +1386,7 @@ function NewProjectModal({
     let contractPdfName = null;
     if (pdfFile) {
       try {
-        const path = `projects/${id}/contract-${Date.now()}-${pdfFile.name.replace(/[^a-zA-Z0-9._-]+/g, "_")}`;
+        const path = `projects/${id}/contract-${Date.now()}-${sanitizeFilename(pdfFile.name)}`;
         const { error: upErr } = await supabase.storage
           .from("co-files")
           .upload(path, pdfFile, { contentType: pdfFile.type || "application/pdf", upsert: false });
@@ -1305,11 +1411,21 @@ function NewProjectModal({
       status,
       subcontractors: selectedSubs,
       vendors: selectedVendors,
+      tradeIds: selectedTrades,
       contractPdfPath,
       contractPdfName,
     });
     setBusy(false);
-    if (res?.ok === false) { setErr(res.error || "Could not save. Check Supabase connection."); return; }
+    if (res?.ok === false) {
+      // Roll back the uploaded PDF so we don't leave an orphan in the bucket.
+      // Awaited (even if it fails) so the user can't retry before cleanup finishes.
+      if (contractPdfPath) {
+        try { await supabase.storage.from("co-files").remove([contractPdfPath]); }
+        catch (e) { console.warn("Orphan PDF cleanup failed", e); }
+      }
+      setErr(res.error || "Could not save. Check Supabase connection.");
+      return;
+    }
     onClose();
   }
 
@@ -1317,7 +1433,7 @@ function NewProjectModal({
     <Dialog open={true} onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         aria-describedby={undefined}
-        className="w-[min(640px,calc(100%-2rem))] max-w-none rounded-2xl border-stone-200 p-0 shadow-[0_40px_100px_-20px_rgba(234,88,12,0.25)]"
+        className="w-[min(640px,calc(100%-2rem))] max-w-none overflow-hidden rounded-2xl border-stone-200 p-0 shadow-[0_40px_100px_-20px_rgba(234,88,12,0.25)]"
       >
         <DialogTitle className="sr-only">New contract / project</DialogTitle>
 
@@ -1334,28 +1450,42 @@ function NewProjectModal({
         </div>
 
         <div className="max-h-[70vh] space-y-3 overflow-auto px-6 py-5">
-          <FieldBlock label="Project name">
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Holiday Inn — Austin"
-              className="h-10 text-sm font-semibold"
-              autoFocus
-            />
+          <FieldBlock label="Project">
+            <Select value={projectMode} onValueChange={setProjectMode}>
+              <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__new__">
+                  <span className="font-semibold">+ New project</span>
+                </SelectItem>
+                {existingProjects.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </FieldBlock>
-          <FieldBlock label="CO prefix">
-            <Input
-              value={prefix}
-              onChange={(e) => setPrefix(e.target.value.toUpperCase())}
-              placeholder="HIAUS"
-              maxLength={6}
-              className="h-9 font-mono text-xs uppercase"
-            />
-            <div className="mt-1 text-[10px] text-stone-500">
-              2–6 letters/digits. CO numbers will be{" "}
-              <span className="font-mono font-semibold text-orange-600">
-                {prefix.trim().toUpperCase() || "PRFX"}-CO-001
-              </span>.
+
+          {projectMode === "__new__" && (
+            <FieldBlock label="Project name">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Holiday Inn — Austin"
+                className="h-10 text-sm font-semibold"
+                autoFocus
+              />
+            </FieldBlock>
+          )}
+          <FieldBlock label="Generated CO prefix">
+            <div className="flex h-9 items-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-3">
+              <span className="font-mono text-sm font-bold text-orange-600">
+                {autoPrefix || "—"}
+              </span>
+              <span className="text-[10px] text-stone-500">
+                · CO numbers will be{" "}
+                <span className="font-mono font-semibold text-orange-600">
+                  {autoPrefix || "PRFX"}-CO-001
+                </span>
+              </span>
             </div>
           </FieldBlock>
 
@@ -1427,14 +1557,13 @@ function NewProjectModal({
             />
           </FieldBlock>
 
-          <FieldBlock label="Vendors">
-            <MultiVendorCombobox
-              items={vendors}
-              selectedIds={selectedVendors}
-              onChange={setSelectedVendors}
-              kind="vendor"
-              onAddNew={addVendor}
-              placeholder="Select vendors…"
+          <FieldBlock label="Trade">
+            <TradeCombobox
+              trades={trades}
+              value={selectedTrades[0] || ""}
+              onChange={(id) => setSelectedTrades(id ? [id] : [])}
+              className="w-full"
+              placeholder="Select trade…"
             />
           </FieldBlock>
 
@@ -1479,7 +1608,7 @@ function NewProjectModal({
           </Button>
           <Button
             onClick={submit}
-            disabled={busy || !name.trim() || !prefix.trim()}
+            disabled={busy || !effectiveName.trim() || !autoPrefix}
             className="flex-[2] bg-orange-600 font-semibold text-white hover:bg-orange-700"
           >
             <Plus className="size-4" strokeWidth={2.5} />
@@ -1513,10 +1642,15 @@ function MultiVendorCombobox({ items = [], selectedIds = [], onChange, kind, onA
     setAdding(true);
     const res = await onAddNew(name, kind);
     setAdding(false);
-    if (res?.ok) {
-      onChange([...selectedIds, res.id || res.vendor?.id].filter(Boolean));
-      setQuery("");
+    if (!res?.ok) return;
+    const newId = res.id || res.vendor?.id;
+    if (!newId) {
+      // Hook returned ok but no id — refuse to push undefined into selection.
+      console.warn("MultiVendorCombobox: addVendor returned ok without an id", res);
+      return;
     }
+    onChange([...selectedIds, newId]);
+    setQuery("");
   }
 
   const exactMatch = items.some((i) => i.name.toLowerCase() === query.trim().toLowerCase());
@@ -1603,6 +1737,7 @@ function MultiVendorCombobox({ items = [], selectedIds = [], onChange, kind, onA
 }
 
 function AddModal({ cos, defaultProject, trades = [], onAdd, onClose }) {
+  const PROJECTS = useProjectsCtx();
   const initialProject = defaultProject || PROJECTS[0].id;
   const initialCategory = trades[0]?.id || "general";
   const [t, setT] = useState({
@@ -1614,7 +1749,7 @@ function AddModal({ cos, defaultProject, trades = [], onAdd, onClose }) {
     assignees: ["pm"], photos: [], attachments: [], comments: [], lineItems: [],
     gcMarkup: 0.10, ownerMarkup: 0, isSubCO: false, subCOs: [],
   });
-  const n = nextCONumber(cos, t.project);
+  const n = nextCONumber(cos, t.project, PROJECTS);
 
   function submit() {
     if (!t.title.trim()) return;
@@ -1634,7 +1769,7 @@ function AddModal({ cos, defaultProject, trades = [], onAdd, onClose }) {
     <Dialog open={true} onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         aria-describedby={undefined}
-        className="w-[min(600px,calc(100%-2rem))] max-w-none rounded-2xl border-stone-200 p-0 shadow-[0_40px_100px_-20px_rgba(234,88,12,0.25)]"
+        className="w-[min(600px,calc(100%-2rem))] max-w-none overflow-hidden rounded-2xl border-stone-200 p-0 shadow-[0_40px_100px_-20px_rgba(234,88,12,0.25)]"
       >
         <DialogTitle className="sr-only">New change order {n}</DialogTitle>
 
@@ -1768,6 +1903,7 @@ function Dashboard({
   onOpenCO,
   onViewChange,
 }) {
+  const PROJECTS = useProjectsCtx();
   const proj = filterProject !== "all" ? PROJECTS.find((p) => p.id === filterProject) : null;
   const scopeLabel = proj ? proj.name : "All projects";
 
@@ -1974,7 +2110,15 @@ function DashRow({ co, onOpenCO, urgent, compact }) {
   );
 }
 
+const CONTRACT_STATUS_STYLES = {
+  draft:              { label: "Draft",              cls: "bg-stone-100 text-stone-700 ring-stone-200" },
+  awarded:            { label: "Awarded",            cls: "bg-orange-50 text-orange-700 ring-orange-200" },
+  sent_for_signature: { label: "Sent for signature", cls: "bg-orange-100 text-orange-800 ring-orange-300" },
+  executed:           { label: "Executed",           cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+};
+
 function ContractSummary({ cos, onNewContract }) {
+  const PROJECTS = useProjectsCtx();
   return (
     <div className="flex-1 overflow-auto px-6 py-5">
       <div className="mb-5 flex items-start justify-between gap-3">
@@ -1995,8 +2139,9 @@ function ContractSummary({ cos, onNewContract }) {
           </Button>
         )}
       </div>
+
       {PROJECTS.map((proj, pi) => {
-        const s = calcProjectSummary(proj.id, cos);
+        const s = calcProjectSummary(proj.id, cos, PROJECTS);
         const currentContract = proj.originalContract + s.executedAmt + s.approvedAmt;
         const exposure = s.executedAmt + s.approvedAmt + s.pendingAmt;
         const pctChange = ((exposure / proj.originalContract) * 100).toFixed(1);
@@ -2035,6 +2180,13 @@ function ContractSummary({ cos, onNewContract }) {
                       {proj.contractType}
                     </span>
                   )}
+                  {proj.status && CONTRACT_STATUS_STYLES[proj.status] && (
+                    <span
+                      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-bold uppercase tracking-wider ring-1 ${CONTRACT_STATUS_STYLES[proj.status].cls}`}
+                    >
+                      {CONTRACT_STATUS_STYLES[proj.status].label}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-0.5 text-[11px] text-stone-500">
                   {proj.startDate && (
@@ -2048,27 +2200,25 @@ function ContractSummary({ cos, onNewContract }) {
                 </div>
               </div>
 
-              {/* Inline stat cards — pushed to the right */}
+              {/* Per-project CO status cards — inline beside the project identity */}
               <div className="ml-auto flex flex-wrap items-stretch gap-1.5">
-                {cards.map((item, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.06 + i * 0.04, duration: 0.2 }}
-                    className="w-[120px] rounded-md border border-stone-200 bg-white px-2.5 py-1.5 shadow-sm"
-                  >
-                    <div className="text-[9px] font-bold uppercase tracking-wider text-stone-500">{item.label}</div>
-                    <div className={`mt-0.5 font-mono text-sm font-extrabold tabular-nums leading-tight ${item.tone}`}>
-                      {fmtAmt(item.val)}
+                {[
+                  { label: "Total contracts",    value: s.mine.length,                                                  num: "text-stone-800",    border: "border-stone-200 bg-white" },
+                  { label: "Executed",           value: s.executed.length,                                              num: "text-emerald-700",  border: "border-emerald-200 bg-emerald-50" },
+                  { label: "Sent for signature", value: s.mine.filter((c) => c.status === "sent_for_signature").length, num: "text-orange-700",   border: "border-orange-200 bg-orange-50" },
+                  { label: "Pending",            value: s.pending.length,                                               num: "text-orange-600",   border: "border-stone-200 bg-white" },
+                ].map((c) => (
+                  <div key={c.label} className="w-[150px] rounded-md border px-2 py-1.5 text-center shadow-sm border-stone-200 bg-white">
+                    <div className={`whitespace-nowrap rounded ${c.border} px-1 py-px text-[9px] font-bold uppercase tracking-wider text-stone-600`}>{c.label}</div>
+                    <div className={`mt-1 font-mono text-sm font-extrabold tabular-nums leading-tight ${c.num}`}>
+                      {c.value}
                     </div>
-                    <div className="mt-0.5 text-[9px] text-stone-500">{item.sub}</div>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
 
-              {/* Current contract value */}
-              <div className="w-[140px] rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-right shadow-sm">
+              {/* Current contract value — kept on the right */}
+              <div className="w-[160px] rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-right shadow-sm">
                 <div className="text-[9px] font-bold uppercase tracking-wider text-emerald-700/80">Current</div>
                 <div className="mt-0.5 font-mono text-base font-extrabold tabular-nums leading-tight text-emerald-700">{fmtAmt(currentContract)}</div>
                 <div className="text-[9px] text-stone-500">
@@ -2171,22 +2321,27 @@ function ContractSummary({ cos, onNewContract }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-export default function ChangeOrderTracker({ user, onSignOut }) {
-  const { cos, loading, error, addCO, updateCO, deleteCO, resetDemo, mode } = useCOs(INIT_COs, user);
+export default function ChangeOrderTracker() {
+  const { cos, loading, error, addCO, updateCO, deleteCO, resetDemo, mode } = useCOs(INIT_COs);
   const { projects: liveProjects, addProject } = useProjects(DEFAULT_PROJECTS);
   const { trades: liveTrades } = useTrades([]);
   const { subcontractors: liveSubs, plainVendors: liveVendors, addVendor } = useVendors();
-  // Sync the module-level PROJECTS so non-React helpers (PDF export, constants) see the live list.
-  PROJECTS = liveProjects.length ? liveProjects : DEFAULT_PROJECTS;
-  // Seed TRADE_CATS with every live trade so label lookups in list/board/PDF views all resolve.
-  if (liveTrades.length) {
+
+  // Live projects go through React context instead of mutating a module-level
+  // variable (safe under strict mode + concurrent rendering).
+  const PROJECTS = liveProjects.length ? liveProjects : DEFAULT_PROJECTS;
+
+  // Seed TRADE_CATS with every live trade so label lookups in list/board/PDF
+  // views all resolve. Done in an effect to avoid mutating module state during
+  // render.
+  useEffect(() => {
+    if (!liveTrades.length) return;
     for (const tr of liveTrades) {
       if (!TRADE_CATS[tr.id]) {
         TRADE_CATS[tr.id] = { label: tr.name, color: "#57534e", Icon: ClipboardList };
       }
     }
-  }
-  const [subCOs]        = useState(INIT_SUBCOs);
+  }, [liveTrades]);
   const [view,  setView] = useState("dashboard");
   const [selectedCO, setSelectedCO] = useState(null);
   const [showAdd,    setShowAdd]    = useState(false);
@@ -2207,13 +2362,24 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
   const [calMonth, setCalMonth] = useState(TODAY_DATE.getMonth());
   const [listStatusTab, setListStatusTab] = useState("all");
 
-  function handleDrop(gKey) {
-    if (!dragging) return;
-    if (groupBy==="status") {
-      const co = cos.find(c=>c.id===dragging);
-      if (co) updateCO({ ...co, status:gKey });
+  // Guard against overlapping drops. While a drop is in flight we ignore further drops
+  // so two rapid cross-column drags can't race to the DB and arrive out of order.
+  const dropInFlight = useRef(false);
+  async function handleDrop(gKey) {
+    if (!dragging || dropInFlight.current) { setDragging(null); setDragOver(null); return; }
+    dropInFlight.current = true;
+    try {
+      if (groupBy === "status") {
+        const co = cos.find((c) => c.id === dragging);
+        if (co && co.status !== gKey) {
+          await updateCO({ ...co, status: gKey });
+        }
+      }
+    } finally {
+      dropInFlight.current = false;
+      setDragging(null);
+      setDragOver(null);
     }
-    setDragging(null); setDragOver(null);
   }
 
   const filtered = useMemo(()=>{
@@ -2326,6 +2492,7 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
   }
 
   return (
+    <ProjectsContext.Provider value={PROJECTS}>
     <div className="relative flex min-h-screen flex-col bg-white text-stone-900 font-[DM_Sans,system-ui,sans-serif]">
       {/* soft orange wash background */}
       <div
@@ -2418,11 +2585,6 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {user && (
-            <span className="max-w-[200px] truncate text-xs font-medium text-stone-500">
-              {user.email}
-            </span>
-          )}
           <Button
             variant="ghost"
             size="sm"
@@ -2432,20 +2594,14 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
             <RotateCcw className="size-3.5" />
             Reset
           </Button>
-          {onSignOut && (
-            <Button variant="ghost" size="sm" onClick={onSignOut} className="text-stone-600">
-              <LogOut className="size-3.5" />
-              Sign out
-            </Button>
-          )}
-          <Button variant="outline" size="sm" onClick={() => exportCSV(filtered)} title="Export filtered list as CSV">
+          <Button variant="outline" size="sm" onClick={() => safeExport(() => exportCSV(filtered), "CSV")} title="Export filtered list as CSV">
             <Download className="size-3.5" />
             CSV
           </Button>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => exportCOsPdf(filtered, { coTypes: CO_TYPES, trades: TRADE_CATS, statuses: STATUSES, priorities: PRIORITY, projects: PROJECTS })}
+            onClick={() => safeExport(() => exportCOsPdf(filtered, { coTypes: CO_TYPES, trades: TRADE_CATS, statuses: STATUSES, priorities: PRIORITY, projects: PROJECTS }), "PDF")}
             title="Export filtered list as PDF"
           >
             <FileDown className="size-3.5" />
@@ -2578,7 +2734,7 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
       </div>
 
       {/* ══ VIEWS ══ */}
-      <AnimatePresence mode="wait">
+      <>
         {view === "dashboard" && (
           <motion.div
             key="dashboard"
@@ -2821,7 +2977,14 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
                                   </div>
                                 </td>
                                 <td className="px-3 py-2">
-                                  <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]">Open</Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-6 px-2 text-[10px]"
+                                    onClick={(e) => { e.stopPropagation(); setSelectedCO(co); }}
+                                  >
+                                    Open
+                                  </Button>
                                 </td>
                               </tr>
                             );
@@ -2942,13 +3105,12 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
             <ContractSummary cos={cos} onNewContract={() => setShowNewProject(true)} />
           </motion.div>
         )}
-      </AnimatePresence>
+      </>
 
       {/* MODALS */}
       {selectedCO && (
         <COModal
           co={selectedCO}
-          subCOs={subCOs}
           onClose={() => setSelectedCO(null)}
           onUpdate={(c) => { updateCO(c); setSelectedCO(c); }}
           onDelete={(id) => { deleteCO(id); setSelectedCO(null); }}
@@ -2960,12 +3122,15 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
           onAdd={addProject}
           existingPrefixes={liveProjects.map((p) => p.prefix)}
           existingIds={liveProjects.map((p) => p.id)}
+          existingProjects={liveProjects}
           subcontractors={liveSubs}
           vendors={liveVendors}
+          trades={liveTrades}
           addVendor={addVendor}
           onClose={() => setShowNewProject(false)}
         />
       )}
     </div>
+    </ProjectsContext.Provider>
   );
 }

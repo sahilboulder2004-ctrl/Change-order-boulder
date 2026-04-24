@@ -4,16 +4,19 @@ export const BUCKET = 'co-files'
 export const MAX_FILE_BYTES = 10 * 1024 * 1024 // 10 MB
 export const SIGNED_URL_TTL_SEC = 60 * 60      // 1 hour
 
-function sanitize(name) {
-  return name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120)
+export function sanitizeFilename(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120)
 }
+
+// Internal alias kept for readability in local callers.
+const sanitize = sanitizeFilename
 
 function randId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 }
 
 export async function uploadFile(coId, file, kind /* 'attachment' | 'photo' */) {
-  if (!supabaseReady) throw new Error('Cloud storage not configured — sign in to upload files.')
+  if (!supabaseReady) throw new Error('Cloud storage not configured — set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local.')
   if (file.size > MAX_FILE_BYTES) throw new Error(`File too large. Max ${MAX_FILE_BYTES / 1024 / 1024} MB.`)
   const path = `${coId}/${kind}/${randId()}-${sanitize(file.name)}`
   const { error } = await supabase.storage.from(BUCKET).upload(path, file, {

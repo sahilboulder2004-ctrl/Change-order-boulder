@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase, supabaseReady } from './supabase.js'
 
 const LS_KEY = 'cot.cos.v2'
@@ -100,11 +100,10 @@ const lsSave = (cos) => {
   try { localStorage.setItem(LS_KEY, JSON.stringify(cos)) } catch {}
 }
 
-export function useCOs(seed, user) {
+export function useCOs(seed) {
   const [cos, setCOs] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const seeded = useRef(false)
 
   // Cloud mode whenever Supabase is configured — login is not required.
   // The schema's RLS allows anon access to change_orders / sub_cos / projects.
@@ -122,44 +121,62 @@ export function useCOs(seed, user) {
       const { data, error } = await supabase.from('change_orders').select('*').order('num')
       if (cancelled) return
       if (error) { setError(error.message); setLoading(false); return }
-      if ((!data || data.length === 0) && !seeded.current) {
-        seeded.current = true
-        const rows = seed.map(toDB)
-        const { error: insErr } = await supabase.from('change_orders').insert(rows)
-        if (insErr) { setError(insErr.message); setLoading(false); return }
-        setCOs(seed)
-      } else {
-        setCOs((data || []).map(fromDB))
-      }
+      // Seeding is done once via supabase/seed.sql. If the table is empty here,
+      // trust that — don't reinsert demo rows (it would resurrect deleted data).
+      setCOs((data || []).map(fromDB))
       setLoading(false)
     }
     load()
     return () => { cancelled = true }
-  }, [useSupabase, user?.id])
+  }, [useSupabase])
 
   useEffect(() => {
     if (!useSupabase && !loading) lsSave(cos)
   }, [cos, useSupabase, loading])
 
   const addCO = useCallback(async (c) => {
+    // Optimistic insert; roll back if the server rejects.
     setCOs(p => [...p, c])
-    if (!useSupabase) return
+    if (!useSupabase) return { ok: true }
     const { error } = await supabase.from('change_orders').insert(toDB(c))
-    if (error) setError(error.message)
+    if (error) {
+      setError(error.message)
+      setCOs(p => p.filter(x => x.id !== c.id))
+      return { ok: false, error: error.message }
+    }
+    return { ok: true }
   }, [useSupabase])
 
   const updateCO = useCallback(async (c) => {
-    setCOs(p => p.map(x => x.id === c.id ? c : x))
-    if (!useSupabase) return
+    let prev
+    setCOs(p => {
+      prev = p.find(x => x.id === c.id)
+      return p.map(x => x.id === c.id ? c : x)
+    })
+    if (!useSupabase) return { ok: true }
     const { error } = await supabase.from('change_orders').update(toDB(c)).eq('id', c.id)
-    if (error) setError(error.message)
+    if (error) {
+      setError(error.message)
+      if (prev) setCOs(p => p.map(x => x.id === c.id ? prev : x))
+      return { ok: false, error: error.message }
+    }
+    return { ok: true }
   }, [useSupabase])
 
   const deleteCO = useCallback(async (id) => {
-    setCOs(p => p.filter(x => x.id !== id))
-    if (!useSupabase) return
+    let prev
+    setCOs(p => {
+      prev = p.find(x => x.id === id)
+      return p.filter(x => x.id !== id)
+    })
+    if (!useSupabase) return { ok: true }
     const { error } = await supabase.from('change_orders').delete().eq('id', id)
-    if (error) setError(error.message)
+    if (error) {
+      setError(error.message)
+      if (prev) setCOs(p => [...p, prev])
+      return { ok: false, error: error.message }
+    }
+    return { ok: true }
   }, [useSupabase])
 
   const resetDemo = useCallback(async () => {

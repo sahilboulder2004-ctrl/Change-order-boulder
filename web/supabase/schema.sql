@@ -4,22 +4,51 @@
 
 -- ─── PROJECTS ───────────────────────────────────────────────────
 create table if not exists public.projects (
-  id                text primary key,
-  prefix            text not null,
-  name              text not null,
-  original_contract numeric default 0,
-  current_contract  numeric default 0,
-  start_date        date,
-  contract_type     text check (contract_type in ('labour','turnkey')),
-  sort_order        integer default 0,
-  created_at        timestamptz default now(),
-  updated_at        timestamptz default now()
+  id                 text primary key,
+  prefix             text not null,
+  name               text not null,
+  original_contract  numeric default 0,
+  current_contract   numeric default 0,
+  start_date         date,
+  contract_date      date,
+  contract_type      text check (contract_type in ('labour','turnkey')),
+  status             text default 'draft' check (status in ('draft','awarded','sent_for_signature','executed')),
+  subcontractors     jsonb default '[]'::jsonb,
+  vendors            jsonb default '[]'::jsonb,
+  trade_ids          jsonb default '[]'::jsonb,
+  contract_pdf_path  text,
+  contract_pdf_name  text,
+  sort_order         integer default 0,
+  created_at         timestamptz default now(),
+  updated_at         timestamptz default now()
 );
 
--- For existing installs, also add the columns idempotently.
+-- For existing installs, add the columns idempotently.
 alter table public.projects
-  add column if not exists start_date date,
-  add column if not exists contract_type text check (contract_type in ('labour','turnkey'));
+  add column if not exists start_date         date,
+  add column if not exists contract_date      date,
+  add column if not exists contract_type      text,
+  add column if not exists status             text default 'draft',
+  add column if not exists subcontractors     jsonb default '[]'::jsonb,
+  add column if not exists vendors            jsonb default '[]'::jsonb,
+  add column if not exists trade_ids          jsonb default '[]'::jsonb,
+  add column if not exists contract_pdf_path  text,
+  add column if not exists contract_pdf_name  text;
+
+-- Apply CHECK constraints after columns exist. Drop-then-add keeps it idempotent
+-- and lets us widen the allowed set over time without errors on re-run.
+alter table public.projects drop constraint if exists projects_contract_type_check;
+alter table public.projects add  constraint projects_contract_type_check
+  check (contract_type is null or contract_type in ('labour','turnkey'));
+
+alter table public.projects drop constraint if exists projects_status_check;
+alter table public.projects add  constraint projects_status_check
+  check (status in ('draft','awarded','sent_for_signature','executed'));
+
+-- ─── updated_at trigger helper (defined early so all triggers below can use it) ──
+create or replace function public.touch_updated_at()
+returns trigger language plpgsql as $$
+begin new.updated_at = now(); return new; end $$;
 
 -- ─── CHANGE ORDERS ──────────────────────────────────────────────
 create table if not exists public.change_orders (
@@ -62,6 +91,64 @@ create table if not exists public.change_orders (
 create index if not exists change_orders_project_idx on public.change_orders (project);
 create index if not exists change_orders_status_idx  on public.change_orders (status);
 create index if not exists change_orders_due_idx     on public.change_orders (due_date);
+
+-- Constrain status values. Idempotent: drop then add.
+alter table public.change_orders drop constraint if exists change_orders_status_check;
+alter table public.change_orders add  constraint change_orders_status_check
+  check (status is null or status in ('draft','submitted','under_review','approved','executed','rejected','voided'));
+
+-- ─── TRADES ─────────────────────────────────────────────────────
+create table if not exists public.trades (
+  id         text primary key,
+  name       text not null,
+  sort_order integer default 0,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create unique index if not exists trades_name_ci_idx on public.trades (lower(name));
+
+drop trigger if exists trades_touch on public.trades;
+create trigger trades_touch before update on public.trades
+  for each row execute function public.touch_updated_at();
+
+alter table public.trades enable row level security;
+
+drop policy if exists "trades_all_anon" on public.trades;
+create policy "trades_all_anon" on public.trades
+  for all to anon using (true) with check (true);
+
+drop policy if exists "trades_all_auth" on public.trades;
+create policy "trades_all_auth" on public.trades
+  for all to authenticated using (true) with check (true);
+
+-- ─── VENDORS ────────────────────────────────────────────────────
+create table if not exists public.vendors (
+  id         text primary key,
+  name       text not null,
+  kind       text not null check (kind in ('vendor','subcontractor')),
+  contact    text,
+  phone      text,
+  email      text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create unique index if not exists vendors_name_kind_idx on public.vendors (lower(name), kind);
+
+drop trigger if exists vendors_touch on public.vendors;
+create trigger vendors_touch before update on public.vendors
+  for each row execute function public.touch_updated_at();
+
+alter table public.vendors enable row level security;
+
+drop policy if exists "vendors_all_anon" on public.vendors;
+create policy "vendors_all_anon" on public.vendors
+  for all to anon using (true) with check (true);
+
+drop policy if exists "vendors_all_auth" on public.vendors;
+create policy "vendors_all_auth" on public.vendors
+  for all to authenticated using (true) with check (true);
 
 -- ─── SUB COs ────────────────────────────────────────────────────
 create table if not exists public.sub_cos (
