@@ -9,10 +9,17 @@ create table if not exists public.projects (
   name              text not null,
   original_contract numeric default 0,
   current_contract  numeric default 0,
+  start_date        date,
+  contract_type     text check (contract_type in ('labour','turnkey')),
   sort_order        integer default 0,
   created_at        timestamptz default now(),
   updated_at        timestamptz default now()
 );
+
+-- For existing installs, also add the columns idempotently.
+alter table public.projects
+  add column if not exists start_date date,
+  add column if not exists contract_type text check (contract_type in ('labour','turnkey'));
 
 -- ─── CHANGE ORDERS ──────────────────────────────────────────────
 create table if not exists public.change_orders (

@@ -2,8 +2,13 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useCOs } from "@/lib/useCOs.js";
+import { useProjects } from "@/lib/useProjects.js";
+import { useTrades } from "@/lib/useTrades.js";
+import { useVendors } from "@/lib/useVendors.js";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
 import { uploadFile, getSignedUrl, removeFile, isFileMeta, MAX_FILE_BYTES } from "@/lib/storage.js";
-import { supabaseReady } from "@/lib/supabase.js";
+import { supabase, supabaseReady } from "@/lib/supabase.js";
 import { exportCOPdf, exportCOsPdf } from "@/lib/pdf.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -101,7 +106,8 @@ const MEMBERS = [
   { id:"sub4",  name:"FastFrame Inc.",  role:"Sub",            avatar:"FF", color:C.yellow, group:"sub"      },
 ];
 
-const PROJECTS = [
+// Fallback list used only when Supabase is unreachable. Real data comes from useProjects().
+const DEFAULT_PROJECTS = [
   { id:"tpsj", prefix:"TPSJ", name:"TownePlace Suites — Jackson",    originalContract:0, currentContract:0 },
   { id:"sybj", prefix:"SYBJ", name:"Staybridge Suites — Jackson",    originalContract:0, currentContract:0 },
   { id:"cwsj", prefix:"CWSJ", name:"Candlewood Suites — Jackson",    originalContract:0, currentContract:0 },
@@ -109,6 +115,7 @@ const PROJECTS = [
   { id:"hibr", prefix:"HIBR", name:"Hampton Inn — Baton Rouge",      originalContract:0, currentContract:0 },
   { id:"hwg",  prefix:"HWG",  name:"Homewood Suites — Gonzales",     originalContract:0, currentContract:0 },
 ];
+let PROJECTS = DEFAULT_PROJECTS; // module-level reference, synced from useProjects() at runtime
 
 // Next CO number for a given project — highest trailing number +1, zero-padded.
 function nextCONumber(cos, projectId) {
@@ -266,12 +273,9 @@ function COCard({ co, onClick }) {
   const metaCount = (co.photos?.length || 0) + (co.attachments?.length || 0);
 
   return (
-    <motion.div
-      whileHover={{ y: -1 }}
-      whileTap={{ scale: 0.99 }}
-      transition={{ type: "spring", stiffness: 400, damping: 28 }}
+    <div
       onClick={() => onClick(co)}
-      className="group mb-2 cursor-pointer overflow-hidden rounded-xl border border-stone-200 bg-white p-3.5 shadow-sm transition-[border-color,box-shadow] hover:border-orange-200 hover:shadow-[0_8px_24px_-12px_rgba(234,88,12,0.25)]"
+      className="group mb-2 cursor-pointer overflow-hidden rounded-xl border border-stone-200 bg-white p-3.5 shadow-sm transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-orange-200 hover:shadow-[0_8px_24px_-12px_rgba(234,88,12,0.25)] active:scale-[0.995]"
       style={{ borderLeft: `3px solid ${sc.color}` }}
     >
       {/* Meta row — CO number + sub/RFI chips */}
@@ -375,7 +379,7 @@ function COCard({ co, onClick }) {
           <DueBadge due={co.dueDate} status={co.status} />
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 }
 
@@ -406,13 +410,7 @@ function FileRow({ f, onRemove }) {
   const Ico = isImage(f) ? ImageIcon : FileText;
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -8 }}
-      className="mb-1.5 flex items-center gap-2.5 rounded-lg border border-stone-200 bg-white px-3 py-2 transition-colors hover:border-orange-300"
-    >
+    <div className="mb-1.5 flex items-center gap-2.5 rounded-lg border border-stone-200 bg-white px-3 py-2 hover:border-orange-300">
       <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-orange-50 text-orange-600">
         <Ico className="size-4" />
       </div>
@@ -442,7 +440,7 @@ function FileRow({ f, onRemove }) {
       <Button variant="ghost" size="icon" onClick={onRemove} title="Remove" className="text-stone-400 hover:text-red-600">
         <Trash2 className="size-3.5" />
       </Button>
-    </motion.div>
+    </div>
   );
 }
 
@@ -690,9 +688,8 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                 const curr = i === currentIdx;
                 return (
                   <div key={sid} className="flex items-center">
-                    <motion.div
-                      layout
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold transition-colors ${
+                    <div
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold ${
                         curr ? "border-orange-400 bg-orange-100 text-orange-700"
                         : past ? "border-emerald-300 bg-emerald-50 text-emerald-700"
                         : "border-stone-200 bg-white text-stone-500"
@@ -700,7 +697,7 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                     >
                       {past ? <Check className="size-3" /> : curr ? <ss.Icon className="size-3" /> : null}
                       {ss.label}
-                    </motion.div>
+                    </div>
                     {i < statusOrder.length - 1 && (
                       <div className={`mx-0.5 h-px w-3 ${i < currentIdx ? "bg-emerald-400" : "bg-stone-200"}`} />
                     )}
@@ -762,11 +759,7 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                 <I className="size-3.5" />
                 {label}
                 {active && (
-                  <motion.div
-                    layoutId="modal-tab-underline"
-                    className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-600"
-                    transition={{ type: "spring", stiffness: 500, damping: 40 }}
-                  />
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-600" />
                 )}
               </button>
             );
@@ -774,15 +767,11 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-auto px-6 py-5">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={tab}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.18 }}
-            >
+        <div
+          className="flex-1 overflow-auto px-6 py-5"
+          style={{ contain: "paint", willChange: "scroll-position" }}
+        >
+          <div key={tab}>
               {tab === "details" && (
                 <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
                   <div className="space-y-4">
@@ -1158,8 +1147,7 @@ function COModal({ co, subCOs, onClose, onUpdate, onDelete }) {
                   </Button>
                 </div>
               )}
-            </motion.div>
-          </AnimatePresence>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -1175,11 +1163,450 @@ function FieldBlock({ label, children }) {
   );
 }
 
+// Searchable trade picker — shadcn combobox pattern (Popover + cmdk Command).
+// `trades` is an array of { id, name }. `value` is a trade id string (or "all" for the filter variant).
+function TradeCombobox({ trades = [], value, onChange, placeholder = "Select trade…", allOption = false, className = "", size = "default" }) {
+  const [open, setOpen] = useState(false);
+  const selected = value === "all" ? { id: "all", name: "All Trades" } : trades.find((t) => t.id === value);
+  const sizeCls = size === "sm" ? "h-8 text-xs" : "h-9 text-sm";
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          role="combobox"
+          aria-expanded={open}
+          className={`flex ${sizeCls} items-center justify-between gap-2 rounded-md border border-input bg-transparent px-3 shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40 ${className}`}
+        >
+          <span className={`truncate ${selected ? "text-stone-800" : "text-muted-foreground"}`}>
+            {selected ? selected.name : placeholder}
+          </span>
+          <ChevronDownIcon />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search trades…" />
+          <CommandList>
+            <CommandEmpty>No trade found.</CommandEmpty>
+            <CommandGroup>
+              {allOption && (
+                <CommandItem
+                  value="All Trades"
+                  onSelect={() => { onChange("all"); setOpen(false); }}
+                >
+                  <span className="flex-1">All Trades</span>
+                  {value === "all" && <Check className="size-4 text-orange-600" />}
+                </CommandItem>
+              )}
+              {trades.map((t) => (
+                <CommandItem
+                  key={t.id}
+                  value={t.name}
+                  onSelect={() => { onChange(t.id); setOpen(false); }}
+                >
+                  <span className="flex-1">{t.name}</span>
+                  {value === t.id && <Check className="size-4 text-orange-600" />}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4 opacity-50">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
 // ─── ADD CO MODAL ─────────────────────────────────────────────────
-function AddModal({ cos, defaultProject, onAdd, onClose }) {
+// ─── NEW CONTRACT (PROJECT) MODAL ──────────────────────────────────
+const CONTRACT_STATUSES = [
+  { v: "active",  l: "Active" },
+  { v: "pending", l: "Pending" },
+  { v: "on_hold", l: "On Hold" },
+  { v: "closed",  l: "Closed" },
+  { v: "other",   l: "Other" },
+];
+
+function NewProjectModal({
+  onAdd,
+  onClose,
+  existingPrefixes = [],
+  existingIds = [],
+  subcontractors = [],
+  vendors = [],
+  addVendor,
+}) {
+  const [name, setName] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [originalContract, setOriginalContract] = useState(0);
+  const [contractDate, setContractDate] = useState("");
+  const [contractType, setContractType] = useState("turnkey");
+  const [status, setStatus] = useState("active");
+  const [selectedSubs, setSelectedSubs] = useState([]);
+  const [selectedVendors, setSelectedVendors] = useState([]);
+  const [pdfFile, setPdfFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const pdfInput = useRef(null);
+
+  const slug = (s) =>
+    (s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+
+  async function submit() {
+    setErr(null);
+    const cleanPrefix = prefix.trim().toUpperCase();
+    const cleanName = name.trim();
+    if (!cleanName) { setErr("Name is required."); return; }
+    if (!/^[A-Z0-9]{2,6}$/.test(cleanPrefix)) { setErr("Prefix must be 2–6 letters/digits."); return; }
+    if (existingPrefixes.includes(cleanPrefix)) { setErr(`Prefix "${cleanPrefix}" is already in use.`); return; }
+    let id = slug(cleanName);
+    if (!id || existingIds.includes(id)) id = slug(cleanName + "-" + cleanPrefix);
+    setBusy(true);
+
+    // Upload PDF first, if any.
+    let contractPdfPath = null;
+    let contractPdfName = null;
+    if (pdfFile) {
+      try {
+        const path = `projects/${id}/contract-${Date.now()}-${pdfFile.name.replace(/[^a-zA-Z0-9._-]+/g, "_")}`;
+        const { error: upErr } = await supabase.storage
+          .from("co-files")
+          .upload(path, pdfFile, { contentType: pdfFile.type || "application/pdf", upsert: false });
+        if (upErr) throw upErr;
+        contractPdfPath = path;
+        contractPdfName = pdfFile.name;
+      } catch (e) {
+        setErr(`PDF upload failed: ${e.message}`);
+        setBusy(false);
+        return;
+      }
+    }
+
+    const res = await onAdd({
+      id,
+      prefix: cleanPrefix,
+      name: cleanName,
+      originalContract: Number(originalContract) || 0,
+      currentContract: Number(originalContract) || 0,
+      contractDate: contractDate || null,
+      contractType,
+      status,
+      subcontractors: selectedSubs,
+      vendors: selectedVendors,
+      contractPdfPath,
+      contractPdfName,
+    });
+    setBusy(false);
+    if (res?.ok === false) { setErr(res.error || "Could not save. Check Supabase connection."); return; }
+    onClose();
+  }
+
+  return (
+    <Dialog open={true} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="w-[min(640px,calc(100%-2rem))] max-w-none rounded-2xl border-stone-200 p-0 shadow-[0_40px_100px_-20px_rgba(234,88,12,0.25)]"
+      >
+        <DialogTitle className="sr-only">New contract / project</DialogTitle>
+
+        <div className="border-b border-stone-200 bg-gradient-to-b from-orange-50/60 to-white px-6 pt-5 pb-4">
+          <div className="flex items-center gap-2">
+            <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-orange-400 to-orange-600">
+              <HardHat className="size-4 text-white" strokeWidth={2.5} />
+            </div>
+            <div>
+              <div className="text-base font-extrabold tracking-tight text-stone-900">New contract</div>
+              <div className="text-[11px] text-stone-500">Create a project to track change orders against.</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="max-h-[70vh] space-y-3 overflow-auto px-6 py-5">
+          <FieldBlock label="Project name">
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Holiday Inn — Austin"
+              className="h-10 text-sm font-semibold"
+              autoFocus
+            />
+          </FieldBlock>
+          <FieldBlock label="CO prefix">
+            <Input
+              value={prefix}
+              onChange={(e) => setPrefix(e.target.value.toUpperCase())}
+              placeholder="HIAUS"
+              maxLength={6}
+              className="h-9 font-mono text-xs uppercase"
+            />
+            <div className="mt-1 text-[10px] text-stone-500">
+              2–6 letters/digits. CO numbers will be{" "}
+              <span className="font-mono font-semibold text-orange-600">
+                {prefix.trim().toUpperCase() || "PRFX"}-CO-001
+              </span>.
+            </div>
+          </FieldBlock>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FieldBlock label="Original contract amount ($)">
+              <Input
+                type="number"
+                value={originalContract}
+                onChange={(e) => setOriginalContract(+e.target.value)}
+                className="h-9 font-mono tabular-nums"
+                min={0}
+              />
+            </FieldBlock>
+            <FieldBlock label="Contract date">
+              <Input
+                type="date"
+                value={contractDate}
+                onChange={(e) => setContractDate(e.target.value)}
+                className="h-9"
+              />
+            </FieldBlock>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FieldBlock label="Contract type">
+              <div className="flex gap-1.5">
+                {[
+                  { v: "turnkey", l: "Turnkey" },
+                  { v: "labour", l: "Labour" },
+                ].map((o) => {
+                  const on = contractType === o.v;
+                  return (
+                    <button
+                      key={o.v}
+                      type="button"
+                      onClick={() => setContractType(o.v)}
+                      className={`flex-1 rounded-md border px-3 py-2 text-sm font-semibold transition-colors ${
+                        on
+                          ? "border-orange-400 bg-orange-50 text-orange-700"
+                          : "border-stone-200 bg-white text-stone-600 hover:border-orange-300"
+                      }`}
+                    >
+                      {o.l}
+                    </button>
+                  );
+                })}
+              </div>
+            </FieldBlock>
+            <FieldBlock label="Status">
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {CONTRACT_STATUSES.map((s) => (
+                    <SelectItem key={s.v} value={s.v}>{s.l}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FieldBlock>
+          </div>
+
+          <FieldBlock label="Subcontractors">
+            <MultiVendorCombobox
+              items={subcontractors}
+              selectedIds={selectedSubs}
+              onChange={setSelectedSubs}
+              kind="subcontractor"
+              onAddNew={addVendor}
+              placeholder="Select subcontractors…"
+            />
+          </FieldBlock>
+
+          <FieldBlock label="Vendors">
+            <MultiVendorCombobox
+              items={vendors}
+              selectedIds={selectedVendors}
+              onChange={setSelectedVendors}
+              kind="vendor"
+              onAddNew={addVendor}
+              placeholder="Select vendors…"
+            />
+          </FieldBlock>
+
+          <FieldBlock label="Attach contract">
+            <input
+              ref={pdfInput}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => setPdfFile(e.target.files?.[0] || null)}
+            />
+            {pdfFile ? (
+              <div className="flex items-center gap-2 rounded-md border border-orange-200 bg-orange-50 px-3 py-2">
+                <FileText className="size-4 text-orange-600" />
+                <span className="flex-1 truncate text-xs font-semibold text-stone-800">{pdfFile.name}</span>
+                <span className="font-mono text-[10px] text-stone-500">{(pdfFile.size / 1024).toFixed(0)} KB</span>
+                <Button size="icon" variant="ghost" onClick={() => setPdfFile(null)} className="size-6 text-stone-400 hover:text-red-600">
+                  <X className="size-3.5" />
+                </Button>
+              </div>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => pdfInput.current?.click()}
+                className="w-full border-dashed border-orange-300 text-stone-700 hover:bg-orange-50 hover:text-orange-700"
+              >
+                <Upload className="size-3.5" />Attach contract
+              </Button>
+            )}
+          </FieldBlock>
+
+          {err && (
+            <div className="rounded-md bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{err}</div>
+          )}
+        </div>
+
+        <div className="flex gap-2 border-t border-stone-200 bg-stone-50/50 px-6 py-3">
+          <Button variant="outline" onClick={onClose} className="flex-1" disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={submit}
+            disabled={busy || !name.trim() || !prefix.trim()}
+            className="flex-[2] bg-orange-600 font-semibold text-white hover:bg-orange-700"
+          >
+            <Plus className="size-4" strokeWidth={2.5} />
+            {busy ? "Saving…" : "Create contract"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Searchable multi-select for vendors/subs with inline "add new" fallback.
+function MultiVendorCombobox({ items = [], selectedIds = [], onChange, kind, onAddNew, placeholder = "Select…" }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [adding, setAdding] = useState(false);
+  const selectedSet = new Set(selectedIds);
+  const selectedItems = items.filter((i) => selectedSet.has(i.id));
+
+  function toggle(id) {
+    if (selectedSet.has(id)) {
+      onChange(selectedIds.filter((x) => x !== id));
+    } else {
+      onChange([...selectedIds, id]);
+    }
+  }
+
+  async function handleAddNew() {
+    const name = query.trim();
+    if (!name || !onAddNew) return;
+    setAdding(true);
+    const res = await onAddNew(name, kind);
+    setAdding(false);
+    if (res?.ok) {
+      onChange([...selectedIds, res.id || res.vendor?.id].filter(Boolean));
+      setQuery("");
+    }
+  }
+
+  const exactMatch = items.some((i) => i.name.toLowerCase() === query.trim().toLowerCase());
+  const showAddNew = query.trim().length > 0 && !exactMatch && onAddNew;
+
+  return (
+    <div>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            role="combobox"
+            aria-expanded={open}
+            className="flex min-h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-transparent px-3 py-1.5 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40"
+          >
+            <div className="flex flex-wrap gap-1">
+              {selectedItems.length === 0 && <span className="text-muted-foreground">{placeholder}</span>}
+              {selectedItems.map((it) => (
+                <span
+                  key={it.id}
+                  className="inline-flex items-center gap-1 rounded-sm bg-orange-50 px-1.5 py-0.5 text-[11px] font-semibold text-orange-700 ring-1 ring-orange-200"
+                >
+                  {it.name}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => { e.stopPropagation(); toggle(it.id); }}
+                    className="text-orange-500 hover:text-orange-800"
+                  >
+                    <X className="size-3" />
+                  </span>
+                </span>
+              ))}
+            </div>
+            <ChevronDownIcon />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+          <Command>
+            <CommandInput placeholder={`Search ${kind}s…`} value={query} onValueChange={setQuery} />
+            <CommandList>
+              <CommandEmpty>
+                {showAddNew ? (
+                  <button
+                    type="button"
+                    disabled={adding}
+                    onClick={handleAddNew}
+                    className="mx-auto my-1 inline-flex items-center gap-1.5 rounded-md bg-orange-50 px-3 py-1.5 text-xs font-semibold text-orange-700 hover:bg-orange-100"
+                  >
+                    <Plus className="size-3.5" />
+                    {adding ? "Adding…" : `Add "${query.trim()}"`}
+                  </button>
+                ) : (
+                  `No ${kind}s found.`
+                )}
+              </CommandEmpty>
+              <CommandGroup>
+                {items.map((it) => {
+                  const on = selectedSet.has(it.id);
+                  return (
+                    <CommandItem key={it.id} value={it.name} onSelect={() => toggle(it.id)}>
+                      <span className="flex-1">{it.name}</span>
+                      {on && <Check className="size-4 text-orange-600" />}
+                    </CommandItem>
+                  );
+                })}
+                {showAddNew && items.length > 0 && (
+                  <CommandItem
+                    value={`__add__${query}`}
+                    onSelect={handleAddNew}
+                    className="text-orange-700"
+                  >
+                    <Plus className="size-4" />
+                    <span className="flex-1 font-semibold">{adding ? "Adding…" : `Add "${query.trim()}"`}</span>
+                  </CommandItem>
+                )}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+function AddModal({ cos, defaultProject, trades = [], onAdd, onClose }) {
   const initialProject = defaultProject || PROJECTS[0].id;
+  const initialCategory = trades[0]?.id || "general";
   const [t, setT] = useState({
-    title: "", description: "", justification: "", type: "owner_directed", category: "general",
+    title: "", description: "", justification: "", type: "owner_directed", category: initialCategory,
     priority: "medium", project: initialProject, status: "draft", submittedBy: "pm", reviewedBy: null,
     submittedDate: TODAY, reviewedDate: null, executedDate: null, dueDate: "",
     requestedAmt: 0, approvedAmt: 0, scheduleImpact: 0,
@@ -1197,7 +1624,6 @@ function AddModal({ cos, defaultProject, onAdd, onClose }) {
 
   const fields = [
     ["CO Type",     "type",        Object.entries(CO_TYPES).map(([k, v]) => ({ v: k, l: v.label }))],
-    ["Trade",       "category",    Object.entries(TRADE_CATS).map(([k, v]) => ({ v: k, l: v.label }))],
     ["Priority",    "priority",    Object.entries(PRIORITY).map(([k, v]) => ({ v: k, l: v.label }))],
     ["Project",     "project",     PROJECTS.map((p) => ({ v: p.id, l: p.name }))],
     ["Status",      "status",      STATUSES.map((s) => ({ v: s.id, l: s.label }))],
@@ -1240,6 +1666,16 @@ function AddModal({ cos, defaultProject, onAdd, onClose }) {
               onChange={(e) => setT((p) => ({ ...p, description: e.target.value }))}
               placeholder="Description of change…"
               className="min-h-[70px]"
+            />
+          </FieldBlock>
+
+          <FieldBlock label="Trade">
+            <TradeCombobox
+              trades={trades}
+              value={t.category}
+              onChange={(v) => setT((p) => ({ ...p, category: v }))}
+              className="w-full"
+              placeholder="Select trade…"
             />
           </FieldBlock>
 
@@ -1538,12 +1974,26 @@ function DashRow({ co, onOpenCO, urgent, compact }) {
   );
 }
 
-function ContractSummary({ cos }) {
+function ContractSummary({ cos, onNewContract }) {
   return (
     <div className="flex-1 overflow-auto px-6 py-5">
-      <div className="mb-1 text-lg font-extrabold tracking-tight text-stone-900">Contract Summary</div>
-      <div className="mb-5 text-xs text-stone-500">
-        Running contract value, CO exposure, and schedule impact per project
+      <div className="mb-5 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-lg font-extrabold tracking-tight text-stone-900">Contract Summary</div>
+          <div className="text-xs text-stone-500">
+            Running contract value, CO exposure, and schedule impact per project
+          </div>
+        </div>
+        {onNewContract && (
+          <Button
+            size="sm"
+            onClick={onNewContract}
+            className="bg-orange-600 font-semibold text-white hover:bg-orange-700"
+          >
+            <Plus className="size-4" strokeWidth={2.5} />
+            New Contract
+          </Button>
+        )}
       </div>
       {PROJECTS.map((proj, pi) => {
         const s = calcProjectSummary(proj.id, cos);
@@ -1571,9 +2021,29 @@ function ContractSummary({ cos }) {
             {/* Header — project identity + stat cards + contract value, all on one row */}
             <div className="flex flex-wrap items-stretch gap-2 border-b border-stone-200 bg-gradient-to-b from-orange-50/60 to-white px-4 py-3">
               {/* Identity */}
-              <div className="flex min-w-[160px] flex-col justify-center pr-2">
-                <div className="text-sm font-extrabold leading-tight tracking-tight text-stone-900">{proj.name}</div>
+              <div className="flex min-w-[180px] flex-col justify-center pr-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="text-sm font-extrabold leading-tight tracking-tight text-stone-900">{proj.name}</div>
+                  {proj.contractType && (
+                    <span
+                      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-bold uppercase tracking-wider ${
+                        proj.contractType === "turnkey"
+                          ? "bg-orange-100 text-orange-700"
+                          : "bg-stone-100 text-stone-700"
+                      }`}
+                    >
+                      {proj.contractType}
+                    </span>
+                  )}
+                </div>
                 <div className="mt-0.5 text-[11px] text-stone-500">
+                  {proj.startDate && (
+                    <>
+                      <Calendar className="mr-1 inline size-3 text-stone-400 align-[-2px]" />
+                      {fmtShort(proj.startDate)}
+                      <span className="mx-1">·</span>
+                    </>
+                  )}
                   {s.mine.length} COs · {s.schedImpact}d sched
                 </div>
               </div>
@@ -1703,10 +2173,24 @@ function ContractSummary({ cos }) {
 // ═══════════════════════════════════════════════════════════════════
 export default function ChangeOrderTracker({ user, onSignOut }) {
   const { cos, loading, error, addCO, updateCO, deleteCO, resetDemo, mode } = useCOs(INIT_COs, user);
+  const { projects: liveProjects, addProject } = useProjects(DEFAULT_PROJECTS);
+  const { trades: liveTrades } = useTrades([]);
+  const { subcontractors: liveSubs, plainVendors: liveVendors, addVendor } = useVendors();
+  // Sync the module-level PROJECTS so non-React helpers (PDF export, constants) see the live list.
+  PROJECTS = liveProjects.length ? liveProjects : DEFAULT_PROJECTS;
+  // Seed TRADE_CATS with every live trade so label lookups in list/board/PDF views all resolve.
+  if (liveTrades.length) {
+    for (const tr of liveTrades) {
+      if (!TRADE_CATS[tr.id]) {
+        TRADE_CATS[tr.id] = { label: tr.name, color: "#57534e", Icon: ClipboardList };
+      }
+    }
+  }
   const [subCOs]        = useState(INIT_SUBCOs);
   const [view,  setView] = useState("dashboard");
   const [selectedCO, setSelectedCO] = useState(null);
   const [showAdd,    setShowAdd]    = useState(false);
+  const [showNewProject, setShowNewProject] = useState(false);
   const [search,     setSearch]     = useState("");
   const [groupBy,    setGroupBy]    = useState("status");
   const [sortBy,     setSortBy]     = useState("due");
@@ -1742,12 +2226,20 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
     if (showSubOnly)             arr=arr.filter(c=>c.isSubCO);
     if (showCreditOnly)          arr=arr.filter(c=>c.requestedAmt<0);
     if (search)                  arr=arr.filter(c=>c.title.toLowerCase().includes(search.toLowerCase())||c.num.toLowerCase().includes(search.toLowerCase()));
+    // Newest-first tiebreaker: IDs created by the UI look like "co{timestamp}",
+    // so numeric descending on the trailing digits floats newly-added COs to the top.
+    const idRank = (c) => {
+      const m = String(c.id || "").match(/(\d+)$/);
+      return m ? -Number(m[1]) : 0;
+    };
     arr=[...arr].sort((a,b)=>{
-      if (sortBy==="due") return (a.dueDate||"9")>(b.dueDate||"9")?1:-1;
-      if (sortBy==="amount") return Math.abs(b.requestedAmt)-Math.abs(a.requestedAmt);
-      if (sortBy==="priority") { const o={critical:0,high:1,medium:2,low:3}; return o[a.priority]-o[b.priority]; }
-      if (sortBy==="num") return a.num.localeCompare(b.num);
-      return 0;
+      let r = 0;
+      if (sortBy==="due") r = (a.dueDate||"9")>(b.dueDate||"9")?1:-1;
+      else if (sortBy==="amount") r = Math.abs(b.requestedAmt)-Math.abs(a.requestedAmt);
+      else if (sortBy==="priority") { const o={critical:0,high:1,medium:2,low:3}; r = o[a.priority]-o[b.priority]; }
+      else if (sortBy==="num") r = b.num.localeCompare(a.num); // newest num first
+      if (r !== 0) return r;
+      return idRank(a) - idRank(b);
     });
     return arr;
   },[cos,filterType,filterStatus,filterPriority,filterProject,filterCategory,showSubOnly,showCreditOnly,search,sortBy]);
@@ -1777,6 +2269,60 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
   function cosOnDay(y,m,d){
     const dt=`${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
     return filtered.filter(c=>c.dueDate===dt);
+  }
+
+  // Click-and-drag horizontal panning for the board. Uses raw window listeners during
+  // a drag + requestAnimationFrame batching for smooth 60fps scrolling.
+  const boardScrollRef = useRef(null);
+  const panState = useRef({
+    active: false,
+    startX: 0,
+    startScroll: 0,
+    targetScroll: 0,
+    rafId: 0,
+    onMove: null,
+    onUp: null,
+  });
+
+  function onBoardMouseDown(e) {
+    if (e.button !== 0) return;
+    const t = e.target;
+    if (t.closest('[draggable="true"], button, a, input, textarea, select')) return;
+    const el = boardScrollRef.current;
+    if (!el) return;
+
+    const state = panState.current;
+    state.active = true;
+    state.startX = e.clientX;
+    state.startScroll = el.scrollLeft;
+    state.targetScroll = el.scrollLeft;
+
+    el.style.cursor = "grabbing";
+    el.style.userSelect = "none";
+
+    const tick = () => {
+      if (!state.active) return;
+      el.scrollLeft = state.targetScroll;
+      state.rafId = requestAnimationFrame(tick);
+    };
+    state.rafId = requestAnimationFrame(tick);
+
+    state.onMove = (ev) => {
+      state.targetScroll = state.startScroll - (ev.clientX - state.startX);
+    };
+    state.onUp = () => {
+      state.active = false;
+      cancelAnimationFrame(state.rafId);
+      el.style.cursor = "";
+      el.style.userSelect = "";
+      window.removeEventListener("pointermove", state.onMove);
+      window.removeEventListener("pointerup", state.onUp);
+      window.removeEventListener("pointercancel", state.onUp);
+    };
+
+    window.addEventListener("pointermove", state.onMove, { passive: true });
+    window.addEventListener("pointerup", state.onUp, { passive: true });
+    window.addEventListener("pointercancel", state.onUp, { passive: true });
   }
 
   return (
@@ -1993,13 +2539,15 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
             {Object.entries(CO_TYPES).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
           </SelectContent>
         </Select>
-        <Select value={filterCategory} onValueChange={setFilterCategory}>
-          <SelectTrigger size="sm" className="w-auto text-xs"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Trades</SelectItem>
-            {Object.entries(TRADE_CATS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
-          </SelectContent>
-        </Select>
+        <TradeCombobox
+          trades={liveTrades}
+          value={filterCategory}
+          onChange={setFilterCategory}
+          allOption
+          size="sm"
+          className="min-w-[160px]"
+          placeholder="All Trades"
+        />
         <Select value={filterPriority} onValueChange={setFilterPriority}>
           <SelectTrigger size="sm" className="w-auto text-xs"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -2057,25 +2605,23 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
         {view === "board" && (
           <motion.div
             key="board"
+            ref={boardScrollRef}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.2 }}
-            className="flex-1 overflow-auto px-6 py-5"
+            onMouseDown={onBoardMouseDown}
+            className="flex-1 cursor-grab overflow-auto px-6 py-5"
           >
             <div className="flex gap-3" style={{ minWidth: grouped.length * 320 }}>
-              {grouped.map((g, gi) => (
-                <motion.div
+              {grouped.map((g) => (
+                <div
                   key={g.key}
-                  layout
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: gi * 0.04, duration: 0.25 }}
                   onDragOver={(e) => { e.preventDefault(); setDragOver(g.key); }}
                   onDrop={() => handleDrop(g.key)}
                   onDragLeave={() => setDragOver(null)}
-                  className="flex min-w-[300px] flex-1 flex-col overflow-hidden rounded-xl border-2 bg-white shadow-sm transition-colors"
-                  style={{ borderColor: dragOver === g.key ? g.color : "#e7e5e4" }}
+                  className="flex min-w-[300px] flex-1 flex-col overflow-hidden rounded-xl border-2 bg-white shadow-sm"
+                  style={{ borderColor: dragOver === g.key ? g.color : "#e7e5e4", contain: "layout paint" }}
                 >
                   <div
                     className="flex items-center gap-2 border-b px-3.5 py-2.5"
@@ -2100,31 +2646,24 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
                     </div>
                   </div>
                   <div className="flex min-h-[120px] flex-col gap-0 p-2.5">
-                    <AnimatePresence mode="popLayout">
-                      {g.items.map((co, i) => (
-                        <motion.div
-                          key={co.id}
-                          layout
-                          initial={{ opacity: 0, scale: 0.97 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.9 }}
-                          transition={{ delay: i * 0.03, duration: 0.2 }}
-                          draggable
-                          onDragStart={() => setDragging(co.id)}
-                          onDragEnd={() => { setDragging(null); setDragOver(null); }}
-                        >
-                          <COCard co={co} onClick={setSelectedCO} />
-                        </motion.div>
-                      ))}
-                    </AnimatePresence>
                     <button
                       onClick={() => setShowAdd(true)}
-                      className="mt-1 w-full rounded-md border border-dashed border-stone-300 py-1.5 text-xs text-stone-500 transition-colors hover:border-orange-400 hover:bg-orange-50 hover:text-orange-600"
+                      className="mb-2 w-full rounded-md border border-dashed border-stone-300 py-1.5 text-xs text-stone-500 transition-colors hover:border-orange-400 hover:bg-orange-50 hover:text-orange-600"
                     >
                       + New CO
                     </button>
+                    {g.items.map((co) => (
+                      <div
+                        key={co.id}
+                        draggable
+                        onDragStart={() => setDragging(co.id)}
+                        onDragEnd={() => { setDragging(null); setDragOver(null); }}
+                      >
+                        <COCard co={co} onClick={setSelectedCO} />
+                      </div>
+                    ))}
                   </div>
-                </motion.div>
+                </div>
               ))}
             </div>
           </motion.div>
@@ -2400,7 +2939,7 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
             transition={{ duration: 0.2 }}
             className="flex-1"
           >
-            <ContractSummary cos={cos} />
+            <ContractSummary cos={cos} onNewContract={() => setShowNewProject(true)} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -2415,7 +2954,18 @@ export default function ChangeOrderTracker({ user, onSignOut }) {
           onDelete={(id) => { deleteCO(id); setSelectedCO(null); }}
         />
       )}
-      {showAdd && <AddModal cos={cos} defaultProject={filterProject !== "all" ? filterProject : PROJECTS[0].id} onAdd={addCO} onClose={() => setShowAdd(false)} />}
+      {showAdd && <AddModal cos={cos} trades={liveTrades} defaultProject={filterProject !== "all" ? filterProject : PROJECTS[0]?.id} onAdd={addCO} onClose={() => setShowAdd(false)} />}
+      {showNewProject && (
+        <NewProjectModal
+          onAdd={addProject}
+          existingPrefixes={liveProjects.map((p) => p.prefix)}
+          existingIds={liveProjects.map((p) => p.id)}
+          subcontractors={liveSubs}
+          vendors={liveVendors}
+          addVendor={addVendor}
+          onClose={() => setShowNewProject(false)}
+        />
+      )}
     </div>
   );
 }
